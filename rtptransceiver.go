@@ -95,26 +95,26 @@ func (t *RTPTransceiver) setDirection(d RTPTransceiverDirection) {
 	t.direction.Store(d)
 }
 
-func (t *RTPTransceiver) setSendingTrack(track *Track) error {
-	t.Sender().setTrack(track)
-	if track == nil {
-		t.setSender(nil)
-	}
-
-	switch {
-	case track != nil && t.Direction() == RTPTransceiverDirectionRecvonly:
-		t.setDirection(RTPTransceiverDirectionSendrecv)
-	case track != nil && t.Direction() == RTPTransceiverDirectionInactive:
-		t.setDirection(RTPTransceiverDirectionSendonly)
-	case track == nil && t.Direction() == RTPTransceiverDirectionSendrecv:
-		t.setDirection(RTPTransceiverDirectionRecvonly)
-	case track == nil && t.Direction() == RTPTransceiverDirectionSendonly:
-		t.setDirection(RTPTransceiverDirectionInactive)
-	default:
-		return errRTPTransceiverSetSendingInvalidState
-	}
-	return nil
-}
+// func (t *RTPTransceiver) setSendingTrack(track *Track) error {
+// 	t.Sender().setTrack(track)
+// 	if track == nil {
+// 		t.setSender(nil)
+// 	}
+//
+// 	switch {
+// 	case track != nil && t.Direction() == RTPTransceiverDirectionRecvonly:
+// 		t.setDirection(RTPTransceiverDirectionSendrecv)
+// 	case track != nil && t.Direction() == RTPTransceiverDirectionInactive:
+// 		t.setDirection(RTPTransceiverDirectionSendonly)
+// 	case track == nil && t.Direction() == RTPTransceiverDirectionSendrecv:
+// 		t.setDirection(RTPTransceiverDirectionRecvonly)
+// 	case track == nil && t.Direction() == RTPTransceiverDirectionSendonly:
+// 		t.setDirection(RTPTransceiverDirectionInactive)
+// 	default:
+// 		return errRTPTransceiverSetSendingInvalidState
+// 	}
+// 	return nil
+// }
 
 func findByMid(mid string, localTransceivers []*RTPTransceiver) (*RTPTransceiver, []*RTPTransceiver) {
 	for i, t := range localTransceivers {

@@ -64,7 +64,7 @@ type PeerConnection struct {
 	onSignalingStateChangeHandler     func(SignalingState)
 	onICEConnectionStateChangeHandler func(ICEConnectionState)
 	onConnectionStateChangeHandler    func(PeerConnectionState)
-	onTrackHandler                    func(*Track, *RTPReceiver)
+	onTrackHandler                    func(*TrackRemote, *RTPReceiver)
 	onDataChannelHandler              func(*DataChannel)
 	onNegotiationNeededHandler        func()
 
@@ -356,7 +356,7 @@ func (pc *PeerConnection) checkNegotiationNeeded() bool { //nolint:gocognit
 			// Step 5.3.1
 			if t.Direction() == RTPTransceiverDirectionSendrecv || t.Direction() == RTPTransceiverDirectionSendonly {
 				descMsid, okMsid := m.Attribute(sdp.AttrKeyMsid)
-				if !okMsid || descMsid != t.Sender().Track().Msid() {
+				if !okMsid || descMsid != t.Sender().Track().StreamID() {
 					return true
 				}
 			}
@@ -406,13 +406,13 @@ func (pc *PeerConnection) OnICEGatheringStateChange(f func(ICEGathererState)) {
 
 // OnTrack sets an event handler which is called when remote track
 // arrives from a remote peer.
-func (pc *PeerConnection) OnTrack(f func(*Track, *RTPReceiver)) {
+func (pc *PeerConnection) OnTrack(f func(*TrackRemote, *RTPReceiver)) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	pc.onTrackHandler = f
 }
 
-func (pc *PeerConnection) onTrack(t *Track, r *RTPReceiver) {
+func (pc *PeerConnection) onTrack(t *TrackRemote, r *RTPReceiver) {
 	pc.mu.RLock()
 	handler := pc.onTrackHandler
 	pc.mu.RUnlock()
@@ -1102,7 +1102,7 @@ func (pc *PeerConnection) startReceiver(incoming trackDetails, receiver *RTPRece
 	for i := range receiver.tracks {
 		receiver.tracks[i].track.mu.Lock()
 		receiver.tracks[i].track.id = incoming.id
-		receiver.tracks[i].track.label = incoming.label
+		receiver.tracks[i].track.streamId = incoming.streamId
 		receiver.tracks[i].track.mu.Unlock()
 	}
 
@@ -1211,8 +1211,8 @@ func (pc *PeerConnection) startRTPSenders(currentTransceivers []*RTPTransceiver)
 			err := transceiver.Sender().Send(RTPSendParameters{
 				Encodings: RTPEncodingParameters{
 					RTPCodingParameters{
-						SSRC:        transceiver.Sender().Track().SSRC(),
-						PayloadType: transceiver.Sender().Track().PayloadType(),
+						SSRC:        transceiver.Sender().ssrc,
+						PayloadType: transceiver.Sender().payloadType,
 					},
 				},
 			})
@@ -1470,48 +1470,6 @@ func (pc *PeerConnection) GetTransceivers() []*RTPTransceiver {
 	return pc.rtpTransceivers
 }
 
-// AddTrack adds a Track to the PeerConnection
-func (pc *PeerConnection) AddTrack(track *Track) (*RTPSender, error) {
-	if pc.isClosed.get() {
-		return nil, &rtcerr.InvalidStateError{Err: ErrConnectionClosed}
-	}
-
-	var transceiver *RTPTransceiver
-	for _, t := range pc.GetTransceivers() {
-		if !t.stopped && t.kind == track.Kind() && t.Sender() == nil {
-			transceiver = t
-			break
-		}
-	}
-	if transceiver != nil {
-		sender, err := pc.api.NewRTPSender(track, pc.dtlsTransport)
-		if err != nil {
-			return nil, err
-		}
-		transceiver.setSender(sender)
-		// we still need to call setSendingTrack to ensure direction has changed
-		if err := transceiver.setSendingTrack(track); err != nil {
-			return nil, err
-		}
-		pc.onNegotiationNeeded()
-
-		return sender, nil
-	}
-
-	transceiver, err := pc.AddTransceiverFromTrack(track)
-	if err != nil {
-		return nil, err
-	}
-
-	return transceiver.Sender(), nil
-}
-
-// AddTransceiver Create a new RtpTransceiver and add it to the set of transceivers.
-// Deprecated: Use AddTrack, AddTransceiverFromKind or AddTransceiverFromTrack
-func (pc *PeerConnection) AddTransceiver(trackOrKind RTPCodecType, init ...RtpTransceiverInit) (*RTPTransceiver, error) {
-	return pc.AddTransceiverFromKind(trackOrKind, init...)
-}
-
 // RemoveTrack removes a Track from the PeerConnection
 func (pc *PeerConnection) RemoveTrack(sender *RTPSender) error {
 	if pc.isClosed.get() {
@@ -1532,9 +1490,9 @@ func (pc *PeerConnection) RemoveTrack(sender *RTPSender) error {
 		return err
 	}
 
-	if err := transceiver.setSendingTrack(nil); err != nil {
-		return err
-	}
+	// if err := transceiver.setSendingTrack(nil); err != nil {
+	// 	return err
+	// }
 
 	pc.onNegotiationNeeded()
 
@@ -1555,19 +1513,6 @@ func (pc *PeerConnection) AddTransceiverFromKind(kind RTPCodecType, init ...RtpT
 	}
 
 	switch direction {
-	case RTPTransceiverDirectionSendrecv:
-		codecs := pc.api.mediaEngine.GetCodecsByKind(kind)
-		if len(codecs) == 0 {
-			return nil, fmt.Errorf("%w: %s", errPeerConnCodecsNotFound, kind.String())
-		}
-
-		track, err := pc.NewTrack(codecs[0].PayloadType, util.RandUint32(), util.MathRandAlpha(trackDefaultIDLength), util.MathRandAlpha(trackDefaultLabelLength))
-		if err != nil {
-			return nil, err
-		}
-
-		return pc.AddTransceiverFromTrack(track, init...)
-
 	case RTPTransceiverDirectionRecvonly:
 		receiver, err := pc.api.NewRTPReceiver(kind, pc.dtlsTransport)
 		if err != nil {
@@ -1590,7 +1535,7 @@ func (pc *PeerConnection) AddTransceiverFromKind(kind RTPCodecType, init ...RtpT
 }
 
 // AddTransceiverFromTrack Create a new RtpTransceiver(SendRecv or SendOnly) and add it to the set of transceivers.
-func (pc *PeerConnection) AddTransceiverFromTrack(track *Track, init ...RtpTransceiverInit) (*RTPTransceiver, error) {
+func (pc *PeerConnection) AddTransceiverFromTrack(track TrackLocal, init ...RtpTransceiverInit) (*RTPTransceiver, error) {
 	if pc.isClosed.get() {
 		return nil, &rtcerr.InvalidStateError{Err: ErrConnectionClosed}
 	}
@@ -1642,7 +1587,7 @@ func (pc *PeerConnection) AddTransceiverFromTrack(track *Track, init ...RtpTrans
 
 		return t, nil
 	default:
-		return nil, errPeerConnAddTransceiverFromTrackOneTransceiver
+		return nil, errPeerConnAddTransceiverFromTrackSupport
 	}
 }
 
@@ -1807,18 +1752,6 @@ func (pc *PeerConnection) Close() error {
 	pc.updateConnectionState(pc.ICEConnectionState(), pc.dtlsTransport.State())
 
 	return util.FlattenErrs(closeErrs)
-}
-
-// NewTrack Creates a new Track
-func (pc *PeerConnection) NewTrack(payloadType uint8, ssrc uint32, id, label string) (*Track, error) {
-	codec, err := pc.api.mediaEngine.getCodec(payloadType)
-	if err != nil {
-		return nil, err
-	} else if codec.Payloader == nil {
-		return nil, errPeerConnCodecPayloaderNotSet
-	}
-
-	return NewTrack(payloadType, ssrc, id, label, codec)
 }
 
 func (pc *PeerConnection) newRTPTransceiver(
@@ -2007,7 +1940,7 @@ func (pc *PeerConnection) startRTP(isRenegotiation bool, remoteDesc *SessionDesc
 
 			if details := trackDetailsForSSRC(trackDetails, ssrc); details != nil {
 				t.Receiver().Track().id = details.id
-				t.Receiver().Track().label = details.label
+				t.Receiver().Track().streamId = details.streamId
 				t.Receiver().Track().mu.Unlock()
 				continue
 			}
